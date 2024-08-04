@@ -7,6 +7,15 @@ pub enum BatteryEvent {
     Unplugged,
 }
 
+impl From<acpid_plug::Event> for BatteryEvent {
+    fn from(item: acpid_plug::Event) -> Self {
+        match item {
+            acpid_plug::Event::Plugged => Self::Plugged,
+            acpid_plug::Event::Unplugged => Self::Unplugged,
+        }
+    }
+}
+
 struct BatteryNotif {
     handle: Option<NotificationHandle>,
     urgency: Urgency,

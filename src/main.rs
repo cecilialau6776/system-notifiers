@@ -1,7 +1,16 @@
 use brightness::Brightness;
 use futures::TryStreamExt;
+use libpulse_binding::{
+    callbacks::ListResult,
+    context::{self, subscribe::InterestMaskSet},
+    mainloop::threaded,
+    operation,
+};
 use notify_rust::{Notification, Timeout};
 use std::{
+    cell::RefCell,
+    ops::Deref,
+    rc::Rc,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -10,29 +19,23 @@ use notify::{
     event::{AccessKind, AccessMode},
     Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
-
-mod battery_notif;
-
-use battery_notif::{BatteryEvent, BatteryNotifications};
 use tokio::{sync::mpsc, time::interval};
 use tokio_stream::{
-    wrappers::{IntervalStream, ReceiverStream},
+    wrappers::{IntervalStream, ReceiverStream, UnboundedReceiverStream},
     StreamExt,
 };
+
+mod audio_notif;
+mod battery_notif;
+
+use audio_notif::{AudioEvent, AudioNotifications};
+use battery_notif::{BatteryEvent, BatteryNotifications};
 
 #[derive(Debug)]
 enum SysEvent {
     Brightness,
     Battery(BatteryEvent),
-}
-
-impl From<acpid_plug::Event> for BatteryEvent {
-    fn from(item: acpid_plug::Event) -> Self {
-        match item {
-            acpid_plug::Event::Plugged => Self::Plugged,
-            acpid_plug::Event::Unplugged => Self::Unplugged,
-        }
-    }
+    Audio(AudioEvent),
 }
 
 #[tokio::main]
@@ -64,18 +67,127 @@ async fn main() -> Result<(), anyhow::Error> {
         Config::default(),
     )?;
 
+    // Pulseaudio stuff
+    let mainloop = Rc::new(RefCell::new(
+        threaded::Mainloop::new().expect("Failed to create pulseaudio mainloop"),
+    ));
+    let context = Rc::new(RefCell::new(
+        context::Context::new(mainloop.borrow().deref(), "system-notifiers")
+            .expect("failed to create pulseaudio context"),
+    ));
+
+    {
+        let ml_ref = Rc::clone(&mainloop);
+        let context_ref = Rc::clone(&context);
+        context
+            .borrow_mut()
+            .set_state_callback(Some(Box::new(move || {
+                let state = unsafe { (*context_ref.as_ptr()).get_state() };
+                match state {
+                    context::State::Ready | context::State::Failed | context::State::Terminated => unsafe {
+                        (*ml_ref.as_ptr()).signal(false);
+                    },
+                    _ => {}
+                }
+            })));
+    }
+
+    context
+        .borrow_mut()
+        .connect(None, context::FlagSet::NOFLAGS, None)
+        .expect("Failed to connect context");
+
+    mainloop.borrow_mut().lock();
+    mainloop.borrow_mut().start()?;
+
+    // Wait for stream to be ready
+    loop {
+        match context.borrow().get_state() {
+            context::State::Ready => {
+                break;
+            }
+            context::State::Failed | context::State::Terminated => {
+                eprintln!("Stream state failed/terminated, quitting...");
+                mainloop.borrow_mut().unlock();
+                mainloop.borrow_mut().stop();
+                return Ok(());
+            }
+            _ => {
+                mainloop.borrow_mut().wait();
+            }
+        }
+    }
+    context.borrow_mut().set_state_callback(None);
+
+    let introspector = context.borrow_mut().introspect();
+
+    let (sink_send, mut sink_recv) = tokio::sync::mpsc::unbounded_channel();
+    let send = sink_send.clone();
+    let sink = "@DEFAULT_SINK@".to_owned();
+
+    let ml_ref = Rc::clone(&mainloop);
+    let o = introspector.get_sink_info_by_name(sink.as_str(), move |r| {
+        if let ListResult::Item(s) = r {
+            let volume = s.volume.get()[0];
+            let mute = s.mute;
+            send.send(Ok(SysEvent::Audio(AudioEvent { volume, mute })))
+                .unwrap();
+            unsafe {
+                (*ml_ref.as_ptr()).signal(false);
+            }
+        }
+    });
+
+    while o.get_state() != operation::State::Done {
+        mainloop.borrow_mut().wait();
+    }
+
+    context
+        .borrow_mut()
+        .subscribe(InterestMaskSet::SINK, |_| {});
+
+    let cb: Option<Box<dyn FnMut(_, _, _)>> = Some(Box::new(move |_, _, _| {
+        let send = sink_send.clone();
+        introspector.get_sink_info_by_name(sink.as_str(), move |r| {
+            if let ListResult::Item(s) = r {
+                let volume = s.volume.get()[0];
+                let mute = s.mute;
+                send.send(Ok(SysEvent::Audio(AudioEvent { volume, mute })))
+                    .expect("failed to send AudioEvent");
+            }
+        });
+    }));
+
+    context.borrow_mut().set_subscribe_callback(cb);
+
+    mainloop.borrow_mut().unlock();
+
+    let initial = sink_recv
+        .recv()
+        .await
+        .ok_or("failed to get first Pulseaudio event")
+        .unwrap();
+    let pa_stream = tokio_stream::once(initial).chain(UnboundedReceiverStream::new(sink_recv));
     // Merge streams. Not using StreamMap because fairness isn't required
-    let mut merged = ac_plug_events.merge(watcher_rx).merge(battery_poller);
+    let mut merged = ac_plug_events
+        .merge(watcher_rx)
+        .merge(battery_poller)
+        .merge(pa_stream);
 
     let path = "/sys/class/backlight/intel_backlight";
     watcher.watch(path.as_ref(), RecursiveMode::NonRecursive)?;
 
     let bat_notifs = Arc::new(Mutex::new(BatteryNotifications::new()));
+    let audio_notifs = Arc::new(Mutex::new(AudioNotifications::new()));
 
     while let Some(ev) = merged.next().await {
         let bat_notifs = bat_notifs.clone();
+        let audio_notifs = audio_notifs.clone();
         tokio::spawn(async move {
-            process_event(ev.expect("event error"), bat_notifs).await;
+            match process_event(ev.expect("event error"), bat_notifs, audio_notifs).await {
+                Ok(_) => {}
+                Err(_) => eprintln!(""),
+            };
         });
     }
 
@@ -99,11 +211,22 @@ where
 async fn process_event(
     event: SysEvent,
     bat_notifs: Arc<Mutex<BatteryNotifications>>,
+    vol_notifs: Arc<Mutex<AudioNotifications>>,
 ) -> Result<(), anyhow::Error> {
     match event {
         SysEvent::Brightness => notify_brightness().await?,
         SysEvent::Battery(e) => process_battery_event(e, bat_notifs).await?,
+        SysEvent::Audio(e) => process_audio_event(e, vol_notifs).await?,
     }
+    Ok(())
+}
+
+async fn process_audio_event(
+    event: AudioEvent,
+    audio_notifs: Arc<Mutex<AudioNotifications>>,
+) -> Result<(), anyhow::Error> {
+    let mut audio_notifs = audio_notifs.lock().unwrap();
+    audio_notifs.update_status(event)?;
     Ok(())
 }
 
@@ -177,7 +300,7 @@ async fn process_battery_event(
 async fn notify_brightness() -> Result<(), anyhow::Error> {
     brightness::brightness_devices()
         .try_for_each(|dev| async move {
-            let name = dev.device_name().await?;
+            // let name = dev.device_name().await?;
             let value = dev.get().await?;
             Notification::new()
                 .summary("Brightness")
