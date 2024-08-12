@@ -44,10 +44,10 @@ enum SysEvent {
 async fn main() -> Result<(), anyhow::Error> {
     let settings: config::Config = confy::load("system-notifiers", None)?;
     println!(
-        "{:?}",
+        "Using configuration at {:?}",
         confy::get_configuration_file_path("system-notifiers", None)
+            .expect("failed to get configuration")
     );
-    // dbg!(settings.get_table("battery.icon")?.get("critical").unwrap());
     // Get AC adapter event stream
     let ac_plug_events = acpid_plug::connect().await?.map(|event| match event {
         Ok(event) => Ok(SysEvent::Battery(event.into())),
@@ -206,7 +206,7 @@ async fn main() -> Result<(), anyhow::Error> {
             .await
             {
                 Ok(_) => {}
-                Err(_) => eprintln!(""),
+                Err(_) => eprintln!(),
             };
         });
     }
@@ -290,7 +290,11 @@ async fn notify_brightness(
     brightness::brightness_devices()
         .try_for_each(|dev| async move {
             let value = dev.get().await?;
-            brightness_notif.lock().unwrap().show(value);
+            brightness_notif
+                .lock()
+                .unwrap()
+                .show(value)
+                .expect("Failed to send brightness notification");
             Ok(())
         })
         .await?;

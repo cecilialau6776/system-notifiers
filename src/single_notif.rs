@@ -40,7 +40,7 @@ impl SingleNotif {
                 notif.body(&body.replace("%v", &value.to_string()));
             }
             if let Some(icon) = &self.icon {
-                notif.icon(&icon);
+                notif.icon(icon);
             }
             self.handle = Some(notif.show()?);
         }

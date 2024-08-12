@@ -103,10 +103,12 @@ impl Default for AudioConfig {
             appname: "volume".to_string(),
             volume: NotifConfig {
                 summary: "Volume".to_string(),
+                body: Some("%v".to_string()),
                 ..Default::default()
             },
             mute: NotifConfig {
                 summary: "Volume".to_string(),
+                body: Some("%v".to_string()),
                 ..Default::default()
             },
         }
