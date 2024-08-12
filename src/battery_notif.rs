@@ -1,4 +1,4 @@
-use notify_rust::{Notification, NotificationHandle, Timeout, Urgency};
+use crate::{config::BatteryConfig, single_notif::SingleNotif};
 
 #[derive(Debug)]
 pub enum BatteryEvent {
@@ -16,99 +16,64 @@ impl From<acpid_plug::Event> for BatteryEvent {
     }
 }
 
-struct BatteryNotif {
-    handle: Option<NotificationHandle>,
-    urgency: Urgency,
-    summary: String,
-    body: Option<String>,
-    icon: Option<String>,
-    timeout: Timeout,
+#[derive(Debug)]
+pub struct BatteryNotifications {
+    critical: SingleNotif,
+    low: SingleNotif,
+    full: SingleNotif,
+    charging: SingleNotif,
+    discharging: SingleNotif,
+    crit_percentage: u8,
+    low_percentage: u8,
+    full_percentage: u8,
 }
 
-impl Default for BatteryNotif {
-    fn default() -> Self {
-        Self {
-            handle: None,
-            urgency: Urgency::Normal,
-            summary: "Battery".to_string(),
-            body: None,
-            icon: None,
-            timeout: Timeout::from(5000),
-        }
+impl BatteryNotifications {
+    pub fn new(config: BatteryConfig) -> Result<Self, anyhow::Error> {
+        Ok(BatteryNotifications {
+            critical: SingleNotif::new_from_config(&config.critical, config.appname.clone()),
+            low: SingleNotif::new_from_config(&config.low, config.appname.clone()),
+            full: SingleNotif::new_from_config(&config.full, config.appname.clone()),
+            charging: SingleNotif::new_from_config(&config.charging, config.appname.clone()),
+            discharging: SingleNotif::new_from_config(&config.discharging, config.appname.clone()),
+            crit_percentage: config.crit_percentage,
+            low_percentage: config.low_percentage,
+            full_percentage: config.full_percentage,
+        })
     }
-}
 
-impl BatteryNotif {
-    fn show(&mut self, percentage: u8) -> Result<(), anyhow::Error> {
-        if self.handle.is_none() {
-            let mut notif = Notification::new()
-                .summary(&self.summary.to_string())
-                .urgency(self.urgency)
-                .timeout(self.timeout)
-                .to_owned();
-            if let Some(body) = &self.body {
-                notif.body(&body.replace("%p", &percentage.to_string()));
+    pub fn update_soc(
+        &mut self,
+        state: battery::State,
+        percentage: u8,
+    ) -> Result<(), anyhow::Error> {
+        if state == battery::State::Discharging {
+            if percentage < self.crit_percentage {
+                self.show_critical_notif(percentage.into())?;
+            } else if percentage < self.low_percentage {
+                self.show_low_notif(percentage.into())?;
+            } else {
+                self.close_low_notif();
+                self.close_critical_notif();
             }
-            if let Some(icon) = &self.icon {
-                notif.icon(&icon);
+        }
+        if state == battery::State::Charging {
+            if percentage > self.full_percentage {
+                self.show_full_notif(percentage.into())?;
+            } else {
+                self.close_full_notif();
             }
-            self.handle = Some(notif.show()?);
         }
         Ok(())
     }
 
-    fn close(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.close();
-        }
-    }
-}
-
-pub struct BatteryNotifications {
-    appname: String,
-    critical: BatteryNotif,
-    low: BatteryNotif,
-    full: BatteryNotif,
-    charging: BatteryNotif,
-    discharging: BatteryNotif,
-}
-
-impl BatteryNotifications {
-    pub fn new() -> Self {
-        BatteryNotifications {
-            appname: "battery".to_owned(),
-            critical: BatteryNotif {
-                urgency: Urgency::Critical,
-                body: Some("Battery Critical".to_owned()),
-                timeout: Timeout::Never,
-                ..Default::default()
-            },
-            low: BatteryNotif {
-                body: Some("Battery Low".to_owned()),
-                ..Default::default()
-            },
-            full: BatteryNotif {
-                body: Some("Battery Full".to_owned()),
-                ..Default::default()
-            },
-            charging: BatteryNotif {
-                body: Some("Plugged".to_owned()),
-                ..Default::default()
-            },
-            discharging: BatteryNotif {
-                body: Some("Unplugged".to_owned()),
-                ..Default::default()
-            },
-        }
-    }
-
-    pub fn show_critical_notif(&mut self, percentage: u8) -> Result<(), anyhow::Error> {
+    fn show_critical_notif(&mut self, percentage: i64) -> Result<(), anyhow::Error> {
         self.critical.show(percentage)
     }
-    pub fn show_low_notif(&mut self, percentage: u8) -> Result<(), anyhow::Error> {
+    fn show_low_notif(&mut self, percentage: i64) -> Result<(), anyhow::Error> {
         self.low.show(percentage)
     }
-    pub fn show_full_notif(&mut self, percentage: u8) -> Result<(), anyhow::Error> {
+    fn show_full_notif(&mut self, percentage: i64) -> Result<(), anyhow::Error> {
         self.full.show(percentage)
     }
     pub fn show_charging_notif(&mut self) -> Result<(), anyhow::Error> {

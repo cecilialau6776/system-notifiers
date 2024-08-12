@@ -7,6 +7,8 @@ Sends desktop notifications when:
 - battery is full, low, or critical
 - ac adapter is plugged/unplugged
 
+## Configuration
+- a
 
 ### Notes
 This is the first(ish) async program I've written, and also probably some of the worst Rust code I've ever written. I've much cleaner projects :)

@@ -1,5 +1,6 @@
 use libpulse_binding::volume::Volume;
-use notify_rust::{Notification, NotificationHandle, Timeout, Urgency};
+
+use crate::{config::AudioConfig, single_notif::SingleNotif};
 
 #[derive(Debug)]
 pub struct AudioEvent {
@@ -7,68 +8,18 @@ pub struct AudioEvent {
     pub mute: bool,
 }
 
-struct AudioNotif {
-    handle: Option<NotificationHandle>,
-    urgency: Urgency,
-    summary: String,
-    icon: Option<String>,
-    timeout: Timeout,
-}
-
-impl Default for AudioNotif {
-    fn default() -> Self {
-        Self {
-            handle: None,
-            urgency: Urgency::Normal,
-            summary: "Volume".to_string(),
-            icon: None,
-            timeout: Timeout::from(5000),
-        }
-    }
-}
-
-impl AudioNotif {
-    fn show(&mut self, body: &str) -> Result<(), anyhow::Error> {
-        if self.handle.is_none() {
-            let mut notif = Notification::new()
-                .summary(&self.summary.to_string())
-                .urgency(self.urgency)
-                .timeout(self.timeout)
-                .body(body)
-                .to_owned();
-            if let Some(icon) = &self.icon {
-                notif.icon(&icon);
-            }
-            self.handle = Some(notif.show()?);
-        }
-        Ok(())
-    }
-
-    fn close(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.close();
-        }
-    }
-}
-
 pub struct AudioNotifications {
-    appname: String,
     last_state: Option<AudioEvent>,
-    volume: AudioNotif,
-    mute: AudioNotif,
+    volume: SingleNotif,
+    mute: SingleNotif,
 }
 
 impl AudioNotifications {
-    pub fn new() -> Self {
+    pub fn new(config: AudioConfig) -> Self {
         AudioNotifications {
-            appname: "volume".to_owned(),
             last_state: None,
-            volume: AudioNotif {
-                ..Default::default()
-            },
-            mute: AudioNotif {
-                ..Default::default()
-            },
+            volume: SingleNotif::new_from_config(&config.volume, config.appname.clone()),
+            mute: SingleNotif::new_from_config(&config.mute, config.appname.clone()),
         }
     }
 
@@ -94,6 +45,6 @@ impl AudioNotifications {
 
     fn show_volume_notif(&mut self, volume: Volume) -> Result<(), anyhow::Error> {
         self.volume.close();
-        self.volume.show(&volume.to_string())
+        self.volume.show(volume)
     }
 }
