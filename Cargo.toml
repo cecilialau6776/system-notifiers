@@ -6,10 +6,8 @@ edition = "2021"
 [dependencies]
 acpid_plug = "0.1.2"
 anyhow = "1.0.86"
-async-stream = "0.3.5"
 battery = "0.7.8"
 brightness = "0.5.0"
-config = "0.14.0"
 confy = { version = "0.6.1", default-features = false, features = ["ron_conf"] }
 env_logger = "0.11.3"
 futures = "0.3.30"
@@ -17,8 +15,6 @@ futures-util = "0.3.30"
 libpulse-binding = "2.28.1"
 notify = "6.1.1"
 notify-rust = "4.11.0"
-pipewire = "0.8.0"
-pulse = "0.5.3"
 serde = { version = "1.0.206", features = ["derive"] }
 tokio = { version = "1.38.1", features = ["full"] }
 tokio-stream = "0.1.15"

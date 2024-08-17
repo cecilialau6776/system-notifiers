@@ -42,6 +42,7 @@ enum SysEvent {
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
+    env_logger::init();
     let settings: config::Config = confy::load("system-notifiers", None)?;
     println!(
         "Using configuration at {:?}",
@@ -290,9 +291,9 @@ async fn notify_brightness(
     brightness::brightness_devices()
         .try_for_each(|dev| async move {
             let value = dev.get().await?;
-            brightness_notif
-                .lock()
-                .unwrap()
+            let mut notif = brightness_notif.lock().unwrap();
+            notif.close();
+            notif
                 .show(value)
                 .expect("Failed to send brightness notification");
             Ok(())
