@@ -58,6 +58,7 @@ impl BatteryNotifications {
             }
         }
         if state == battery::State::Charging {
+            self.close_critical_notif();
             if percentage > self.full_percentage {
                 self.show_full_notif(percentage.into())?;
             } else {

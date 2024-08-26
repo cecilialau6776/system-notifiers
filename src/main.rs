@@ -21,7 +21,7 @@ use notify::{
 };
 use tokio::{sync::mpsc, time::interval};
 use tokio_stream::{
-    wrappers::{IntervalStream, ReceiverStream, UnboundedReceiverStream},
+    wrappers::{IntervalStream, UnboundedReceiverStream},
     StreamExt,
 };
 
@@ -54,27 +54,32 @@ async fn main() -> Result<(), anyhow::Error> {
         Ok(event) => Ok(SysEvent::Battery(event.into())),
         Err(e) => Err(e),
     });
+    println!("got ac_plug_events");
 
     // Get battery poller stream
     let battery_poller = IntervalStream::new(interval(Duration::from_secs(8)))
         .map(|_| Ok(SysEvent::Battery(BatteryEvent::Poll)));
+    println!("got battery poller");
 
     // Get file watcher event stream
-    let (tx, rx) = mpsc::channel::<Event>(1);
-    let watcher_rx = ReceiverStream::new(rx).map(|_| Ok(SysEvent::Brightness));
+    let (tx, rx) = mpsc::unbounded_channel();
+    let watcher_rx = UnboundedReceiverStream::new(rx).map(|_| Ok(SysEvent::Brightness));
+    println!("got reciever stream");
 
     let mut watcher = RecommendedWatcher::new(
         move |res: std::result::Result<Event, notify::Error>| {
             futures::executor::block_on(async {
                 if let Ok(r) = res {
                     if r.kind == EventKind::Access(AccessKind::Close(AccessMode::Write)) {
-                        tx.send(r).await.unwrap();
+                        tx.send(r).unwrap();
                     }
                 }
             })
         },
         Config::default(),
     )?;
+
+    println!("got file watcher stream");
 
     // Pulseaudio stuff
     let mainloop = Rc::new(RefCell::new(
@@ -103,16 +108,19 @@ async fn main() -> Result<(), anyhow::Error> {
 
     context
         .borrow_mut()
-        .connect(None, context::FlagSet::NOFLAGS, None)
+        .connect(None, context::FlagSet::NOFAIL, None)
         .expect("Failed to connect context");
 
+    println!("locking and starting mainloop");
     mainloop.borrow_mut().lock();
     mainloop.borrow_mut().start()?;
+    println!("locked and started mainloop");
 
     // Wait for stream to be ready
     loop {
         match context.borrow().get_state() {
             context::State::Ready => {
+                println!("state: Ready");
                 break;
             }
             context::State::Failed | context::State::Terminated => {
@@ -122,6 +130,8 @@ async fn main() -> Result<(), anyhow::Error> {
                 return Ok(());
             }
             _ => {
+                println!("waiting in loop");
+                println!("state: {:?}", context.borrow().get_state());
                 mainloop.borrow_mut().wait();
             }
         }
@@ -130,34 +140,17 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let introspector = context.borrow_mut().introspect();
 
-    let (sink_send, mut sink_recv) = tokio::sync::mpsc::unbounded_channel();
-    let send = sink_send.clone();
-    let sink = "@DEFAULT_SINK@".to_owned();
-
-    let ml_ref = Rc::clone(&mainloop);
-    let o = introspector.get_sink_info_by_name(sink.as_str(), move |r| {
-        if let ListResult::Item(s) = r {
-            let volume = s.volume.get()[0];
-            let mute = s.mute;
-            send.send(Ok(SysEvent::Audio(AudioEvent { volume, mute })))
-                .unwrap();
-            unsafe {
-                (*ml_ref.as_ptr()).signal(false);
-            }
-        }
-    });
-
-    while o.get_state() != operation::State::Done {
-        mainloop.borrow_mut().wait();
-    }
-
+    let (sink_send, sink_recv) = tokio::sync::mpsc::unbounded_channel();
+    let sink = "@DEFAULT_SINK@";
+    println!("subscribing");
     context
         .borrow_mut()
         .subscribe(InterestMaskSet::SINK, |_| {});
+    println!("subscribed");
 
     let cb: Option<Box<dyn FnMut(_, _, _)>> = Some(Box::new(move |_, _, _| {
         let send = sink_send.clone();
-        introspector.get_sink_info_by_name(sink.as_str(), move |r| {
+        introspector.get_sink_info_by_name(sink, move |r| {
             if let ListResult::Item(s) = r {
                 let volume = s.volume.get()[0];
                 let mute = s.mute;
@@ -167,17 +160,14 @@ async fn main() -> Result<(), anyhow::Error> {
         });
     }));
 
+    println!("setting subscribe callback");
     context.borrow_mut().set_subscribe_callback(cb);
+    println!("set subscribe callback");
 
     mainloop.borrow_mut().unlock();
 
-    let initial = sink_recv
-        .recv()
-        .await
-        .ok_or("failed to get first Pulseaudio event")
-        .unwrap();
-    let pa_stream = tokio_stream::once(initial).chain(UnboundedReceiverStream::new(sink_recv));
-    // Merge streams. Not using StreamMap because fairness isn't required
+    let pa_stream = UnboundedReceiverStream::new(sink_recv).skip(2);
+    println!("got pa_stream");
     let mut merged = ac_plug_events
         .merge(watcher_rx)
         .merge(battery_poller)
@@ -193,6 +183,7 @@ async fn main() -> Result<(), anyhow::Error> {
         settings.brightness.appname.clone(),
     )));
 
+    println!("starting loop");
     while let Some(ev) = merged.next().await {
         let bat_notifs = bat_notifs.clone();
         let audio_notifs = audio_notifs.clone();
@@ -211,6 +202,7 @@ async fn main() -> Result<(), anyhow::Error> {
             };
         });
     }
+    println!("ending loop");
 
     Ok(())
 }
